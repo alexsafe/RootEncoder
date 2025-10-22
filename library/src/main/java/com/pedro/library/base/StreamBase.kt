@@ -387,9 +387,13 @@ abstract class StreamBase(
     }
     videoSource.stop()
     videoSource.release()
-    glInterface.surfaceTexture.tryClear()
-    if (wasRunning) source.start(glInterface.surfaceTexture)
-    glInterface.setOrientationConfig(source.getOrientationConfig())
+    try {
+      glInterface.surfaceTexture.tryClear()
+      if (wasRunning) source.start(glInterface.surfaceTexture)
+      glInterface.setOrientationConfig(source.getOrientationConfig())
+    } catch (e: Exception) {
+      e.printStackTrace()
+    }
     videoSource = source
   }
 
