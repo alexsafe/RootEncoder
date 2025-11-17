@@ -19,6 +19,7 @@ package com.pedro.encoder.utils;
 import android.media.MediaCodecInfo;
 import android.media.MediaCodecList;
 import android.os.Build;
+import android.util.Log;
 
 import androidx.annotation.RequiresApi;
 
@@ -413,8 +414,10 @@ public class CodecUtil {
         mediaCodecInfo.getCapabilitiesForType(mime);
     MediaCodecInfo.EncoderCapabilities encoderCapabilities =
         codecCapabilities.getEncoderCapabilities();
-    return encoderCapabilities.isBitrateModeSupported(
-        MediaCodecInfo.EncoderCapabilities.BITRATE_MODE_CBR);
+    Boolean isSupported =  encoderCapabilities.isBitrateModeSupported(
+              MediaCodecInfo.EncoderCapabilities.BITRATE_MODE_CBR);
+    Log.d("VBR", "isCBRModeSupported: $isSupported");
+    return  isSupported;
   }
 
   /**
