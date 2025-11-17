@@ -627,20 +627,30 @@ abstract class StreamBase(
 
   abstract fun getStreamClient(): StreamBaseClient
 
+    fun setVideoRecCodec(codec: VideoCodec) {
+
+        recordController.setVideoCodec(codec)
+        val type = when (codec) {
+            VideoCodec.H264 -> CodecUtil.H264_MIME
+            VideoCodec.H265 -> CodecUtil.H265_MIME
+            VideoCodec.AV1 -> CodecUtil.AV1_MIME
+        }
+
+        videoEncoderRecord.type = type
+    }
+
   /**
    * Change VideoCodec used.
    * This could fail depend of the Codec supported in each Protocol. For example AV1 is not supported in SRT
    */
   fun setVideoCodec(codec: VideoCodec) {
     setVideoCodecImp(codec)
-    recordController.setVideoCodec(codec)
     val type = when (codec) {
       VideoCodec.H264 -> CodecUtil.H264_MIME
       VideoCodec.H265 -> CodecUtil.H265_MIME
       VideoCodec.AV1 -> CodecUtil.AV1_MIME
     }
     videoEncoder.type = type
-    videoEncoderRecord.type = type
   }
 
   /**
