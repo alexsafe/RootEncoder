@@ -643,9 +643,8 @@ abstract class StreamBase(
             VideoCodec.H265 -> CodecUtil.H265_MIME
             VideoCodec.AV1 -> CodecUtil.AV1_MIME
         }
+
         CodecUtil.showAllCodecsInfo()
-//        videoEncoderRecord.setTryForceVBRBitrateMode(true)
-//        videoEncoderRecord.
         videoEncoderRecord.type = type
     }
 

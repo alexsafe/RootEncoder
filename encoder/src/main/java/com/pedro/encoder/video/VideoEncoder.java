@@ -29,7 +29,6 @@ import android.view.Surface;
 import androidx.annotation.NonNull;
 import androidx.annotation.RequiresApi;
 
-import com.pedro.common.BitrateManager;
 import com.pedro.common.TimeUtils;
 import com.pedro.common.av1.Av1Parser;
 import com.pedro.common.av1.Obu;
@@ -76,369 +75,355 @@ public class VideoEncoder extends BaseEncoder implements GetCameraData {
     private int level = -1;
     private boolean tryForceVBRBitrateMode = false;
 
-    public VideoEncoder(GetVideoData getVideoData) {
-        this.getVideoData = getVideoData;
-        typeError = CodecUtil.CodecTypeError.VIDEO_CODEC;
-        type = CodecUtil.H264_MIME;
-        TAG = "VideoEncoder";
+  public VideoEncoder(GetVideoData getVideoData) {
+    this.getVideoData = getVideoData;
+    typeError = CodecUtil.CodecTypeError.VIDEO_CODEC;
+    type = CodecUtil.H264_MIME;
+    TAG = "VideoEncoder";
+  }
+
+  public boolean prepareVideoEncoder(int width, int height, int fps, int bitRate, int rotation,
+      int iFrameInterval, FormatVideoEncoder formatVideoEncoder) {
+    return prepareVideoEncoder(width, height, fps, bitRate, rotation, iFrameInterval,
+        formatVideoEncoder, -1, -1);
+  }
+
+  /**
+   * Prepare encoder with custom parameters
+   */
+  public boolean prepareVideoEncoder(int width, int height, int fps, int bitRate, int rotation,
+      int iFrameInterval, FormatVideoEncoder formatVideoEncoder, int profile,
+      int level) {
+    if (prepared) stop();
+
+    if (width % 2 != 0) {
+      throw new IllegalArgumentException("Invalid width: " + width + ", must be an even value");
     }
-
-    public boolean prepareVideoEncoder(int width, int height, int fps, int bitRate, int rotation,
-                                       int iFrameInterval, FormatVideoEncoder formatVideoEncoder) {
-        return prepareVideoEncoder(width, height, fps, bitRate, rotation, iFrameInterval,
-                formatVideoEncoder, -1, -1);
+    if (height % 2 != 0) {
+      throw new IllegalArgumentException("Invalid height: " + height + ", must be an even value");
     }
-
-    /**
-     * Prepare encoder with custom parameters
-     */
-    public boolean prepareVideoEncoder(int width, int height, int fps, int bitRate, int rotation,
-                                       int iFrameInterval, FormatVideoEncoder formatVideoEncoder, int profile,
-                                       int level) {
-        if (prepared) stop();
-
-        if (width % 2 != 0) {
-            throw new IllegalArgumentException("Invalid width: " + width + ", must be an even value");
-        }
-        if (height % 2 != 0) {
-            throw new IllegalArgumentException("Invalid height: " + height + ", must be an even value");
-        }
-        if (fps <= 0) {
-            throw new IllegalArgumentException("Invalid fps: " + fps + ", must be higher than 0");
-        }
-        this.width = width;
-        this.height = height;
-        this.fps = fps;
-        this.bitRate = bitRate;
-        this.rotation = rotation;
-        this.iFrameInterval = iFrameInterval;
-        this.formatVideoEncoder = formatVideoEncoder;
-        this.profile = profile;
-        this.level = level;
-        isBufferMode = true;
-        MediaCodecInfo encoder = chooseEncoder(type);
-        try {
-            if (encoder != null) {
-                Log.i(TAG, "Encoder selected " + encoder.getName());
-                codec = MediaCodec.createByCodecName(encoder.getName());
-                if (this.formatVideoEncoder == FormatVideoEncoder.YUV420Dynamical) {
-                    this.formatVideoEncoder = chooseColorDynamically(encoder);
-                    if (this.formatVideoEncoder == null) {
-                        Log.e(TAG, "YUV420 dynamical choose failed");
-                        return false;
-                    }
-                }
-            } else {
-                Log.e(TAG, "Valid encoder not found");
-                return false;
-            }
-            MediaFormat videoFormat;
-            //if you don't use mediacodec rotation you need swap width and height in rotation 90 or 270
-            // for correct encoding resolution
-            String resolution;
-            if ((rotation == 90 || rotation == 270)) {
-                resolution = height + "x" + width;
-                videoFormat = MediaFormat.createVideoFormat(type, height, width);
-            } else {
-                resolution = width + "x" + height;
-                videoFormat = MediaFormat.createVideoFormat(type, width, height);
-            }
-            Log.i(TAG, "Prepare video info: " + this.formatVideoEncoder.name() + ", " + resolution);
-            videoFormat.setInteger(MediaFormat.KEY_COLOR_FORMAT,
-                    this.formatVideoEncoder.getFormatCodec());
-            videoFormat.setInteger(MediaFormat.KEY_MAX_INPUT_SIZE, 0);
-            videoFormat.setInteger(MediaFormat.KEY_BIT_RATE, bitRate);
-            videoFormat.setInteger(MediaFormat.KEY_FRAME_RATE, fps);
-
-            videoFormat.setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, iFrameInterval);
-            Log.d("VBR", "bitrate mode tryForceVBRBitrateMode : " + tryForceVBRBitrateMode);
-            //Set CBR mode if supported by encoder.
-            if (tryForceVBRBitrateMode) {
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
-                    Log.d("VBR", "set bitrate mode VBR");
-                    videoFormat.setInteger(MediaFormat.KEY_BITRATE_MODE, MediaCodecInfo.EncoderCapabilities.BITRATE_MODE_VBR);
-                }
-            } else {
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP && CodecUtil.isCBRModeSupported(encoder, type)) {
-                    Log.i(TAG, "set bitrate mode CBR");
-                    videoFormat.setInteger(MediaFormat.KEY_BITRATE_MODE,
-                            MediaCodecInfo.EncoderCapabilities.BITRATE_MODE_CBR);
-                } else {
-                    Log.i(TAG, "bitrate mode CBR not supported using default mode");
-                }
-            }
-
-            // Rotation by encoder.
-            // Removed because this is ignored by most encoders, producing different results on different devices
-            //  videoFormat.setInteger(MediaFormat.KEY_ROTATION, rotation);
-
-            if (this.profile > 0) {
-                // MediaFormat.KEY_PROFILE, API > 21
-                videoFormat.setInteger("profile", this.profile);
-            }
-            if (this.level > 0) {
-                // MediaFormat.KEY_LEVEL, API > 23
-                videoFormat.setInteger("level", this.level);
-            }
-            setCallback();
-            codec.configure(videoFormat, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE);
-            running = false;
-            if (formatVideoEncoder == FormatVideoEncoder.SURFACE
-                    && Build.VERSION.SDK_INT >= Build.VERSION_CODES.JELLY_BEAN_MR2) {
-                isBufferMode = false;
-                inputSurface = codec.createInputSurface();
-            }
-            Log.i(TAG, "prepared");
-            prepared = true;
-            return true;
-        } catch (Exception e) {
-            Log.e(TAG, "Create VideoEncoder failed.", e);
-            this.stop();
+    if (fps <= 0) {
+      throw new IllegalArgumentException("Invalid fps: " + fps + ", must be higher than 0");
+    }
+    this.width = width;
+    this.height = height;
+    this.fps = fps;
+    this.bitRate = bitRate;
+    this.rotation = rotation;
+    this.iFrameInterval = iFrameInterval;
+    this.formatVideoEncoder = formatVideoEncoder;
+    this.profile = profile;
+    this.level = level;
+    isBufferMode = true;
+    MediaCodecInfo encoder = chooseEncoder(type);
+    try {
+      if (encoder != null) {
+        Log.i(TAG, "Encoder selected " + encoder.getName());
+        codec = MediaCodec.createByCodecName(encoder.getName());
+        if (this.formatVideoEncoder == FormatVideoEncoder.YUV420Dynamical) {
+          this.formatVideoEncoder = chooseColorDynamically(encoder);
+          if (this.formatVideoEncoder == null) {
+            Log.e(TAG, "YUV420 dynamical choose failed");
             return false;
+          }
         }
-    }
-
-    @Override
-    public void start(boolean resetTs) {
-        if (resetTs) firstTimestamp = 0;
-        forceKey = false;
-        shouldReset = resetTs;
-        spsPpsSetted = false;
-        if (formatVideoEncoder != FormatVideoEncoder.SURFACE) {
-            YUVUtil.preAllocateBuffers(width * height * 3 / 2);
-        }
-        Log.i(TAG, "started");
-    }
-
-    @Override
-    protected void stopImp() {
-        spsPpsSetted = false;
-        if (inputSurface != null) inputSurface.release();
-        inputSurface = null;
-        oldSps = null;
-        oldPps = null;
-        oldVps = null;
-        Log.i(TAG, "stopped");
-    }
-
-    @Override
-    public boolean reset() {
-        stop(false);
-        boolean result = prepareVideoEncoder(width, height, fps, bitRate, rotation, iFrameInterval, formatVideoEncoder,
-                profile, level);
-        if (!result) return false;
-        restart();
-        return true;
-    }
-
-    private FormatVideoEncoder chooseColorDynamically(MediaCodecInfo mediaCodecInfo) {
-        for (int color : mediaCodecInfo.getCapabilitiesForType(type).colorFormats) {
-            if (color == FormatVideoEncoder.YUV420PLANAR.getFormatCodec()) {
-                return FormatVideoEncoder.YUV420PLANAR;
-            } else if (color == FormatVideoEncoder.YUV420SEMIPLANAR.getFormatCodec()) {
-                return FormatVideoEncoder.YUV420SEMIPLANAR;
-            }
-        }
-        return null;
-    }
-
-    /**
-     * Prepare encoder with default parameters
-     */
-    public boolean prepareVideoEncoder() {
-        return prepareVideoEncoder(width, height, fps, bitRate, rotation, iFrameInterval,
-                formatVideoEncoder, profile, level);
-    }
-
-    @RequiresApi(api = Build.VERSION_CODES.KITKAT)
-    public void setVideoBitrateOnFly(int bitrate) {
-        if (isRunning()) {
-            this.bitRate = bitrate;
-            Bundle bundle = new Bundle();
-            bundle.putInt(MediaCodec.PARAMETER_KEY_VIDEO_BITRATE, bitrate);
-            try {
-                codec.setParameters(bundle);
-            } catch (IllegalStateException e) {
-                Log.e(TAG, "encoder need be running", e);
-            }
-        }
-    }
-
-    @RequiresApi(api = Build.VERSION_CODES.KITKAT)
-    public void requestKeyframe() {
-        if (isRunning()) {
-            if (spsPpsSetted && oldSps != null) {
-                Bundle bundle = new Bundle();
-                bundle.putInt(MediaCodec.PARAMETER_KEY_REQUEST_SYNC_FRAME, 0);
-                try {
-                    codec.setParameters(bundle);
-                    getVideoData.onVideoInfo(oldSps, oldPps, oldVps);
-                } catch (IllegalStateException e) {
-                    Log.e(TAG, "encoder need be running", e);
-                }
-            } else {
-                //You need wait until encoder generate first frame.
-                spsPpsSetted = false;
-                forceKey = true;
-            }
-        }
-    }
-
-    public Surface getInputSurface() {
-        return inputSurface;
-    }
-
-    public void setInputSurface(Surface inputSurface) {
-        this.inputSurface = inputSurface;
-    }
-
-    public int getWidth() {
-        return width;
-    }
-
-    public int getHeight() {
-        return height;
-    }
-
-    public int getRotation() {
-        return rotation;
-    }
-
-    public void setFps(int fps) {
-        this.fps = fps;
-    }
-
-    public void setRotation(int rotation) {
-        this.rotation = rotation;
-    }
-
-    public int getFps() {
-        return fps;
-    }
-
-    public int getBitRate() {
-        return bitRate;
-    }
-
-    public void setForceFps(int fps) {
-        fpsLimiter.setFPS(fps);
-    }
-
-    public void setTryForceVBRBitrateMode(boolean tryForceVBRBitrateMode) {
-        this.tryForceVBRBitrateMode = tryForceVBRBitrateMode;
-    }
-
-    @Override
-    public void inputYUVData(@NonNull Frame frame) {
-        if (running && !queue.offer(frame)) {
-            Log.i(TAG, "frame discarded");
-        }
-    }
-
-    private boolean sendSPSandPPS(MediaFormat mediaFormat) {
-        //AV1
-        if (type.equals(CodecUtil.AV1_MIME)) {
-            ByteBuffer bufferInfo = mediaFormat.getByteBuffer("csd-0");
-            //we need an av1ConfigurationRecord with sequenceObu to work
-            if (bufferInfo != null && bufferInfo.remaining() > 4) {
-                oldSps = bufferInfo;
-                getVideoData.onVideoInfo(bufferInfo, null, null);
-                return true;
-            }
-            //H265
-        } else if (type.equals(CodecUtil.H265_MIME)) {
-            ByteBuffer bufferInfo = mediaFormat.getByteBuffer("csd-0");
-            if (bufferInfo != null) {
-                List<ByteBuffer> byteBufferList = extractVpsSpsPpsFromH265(bufferInfo);
-                oldSps = byteBufferList.get(1);
-                oldPps = byteBufferList.get(2);
-                oldVps = byteBufferList.get(0);
-                getVideoData.onVideoInfo(oldSps, oldPps, oldVps);
-                return true;
-            }
-            //H264
-        } else {
-            ByteBuffer sps = mediaFormat.getByteBuffer("csd-0");
-            ByteBuffer pps = mediaFormat.getByteBuffer("csd-1");
-            if (sps != null && pps != null) {
-                oldSps = sps;
-                oldPps = pps;
-                oldVps = null;
-                getVideoData.onVideoInfo(oldSps, oldPps, oldVps);
-                return true;
-            }
-        }
+      } else {
+        Log.e(TAG, "Valid encoder not found");
         return false;
+      }
+      MediaFormat videoFormat;
+      //if you don't use mediacodec rotation you need swap width and height in rotation 90 or 270
+      // for correct encoding resolution
+      String resolution;
+      if ((rotation == 90 || rotation == 270)) {
+        resolution = height + "x" + width;
+        videoFormat = MediaFormat.createVideoFormat(type, height, width);
+      } else {
+        resolution = width + "x" + height;
+        videoFormat = MediaFormat.createVideoFormat(type, width, height);
+      }
+      Log.i(TAG, "Prepare video info: " + this.formatVideoEncoder.name() + ", " + resolution);
+      videoFormat.setInteger(MediaFormat.KEY_COLOR_FORMAT,
+          this.formatVideoEncoder.getFormatCodec());
+      videoFormat.setInteger(MediaFormat.KEY_MAX_INPUT_SIZE, 0);
+      videoFormat.setInteger(MediaFormat.KEY_BIT_RATE, bitRate);
+      videoFormat.setInteger(MediaFormat.KEY_FRAME_RATE, fps);
+      videoFormat.setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, iFrameInterval);
+      //Set CBR mode if supported by encoder.
+      if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP && CodecUtil.isCBRModeSupported(encoder, type)) {
+        Log.i(TAG, "set bitrate mode CBR");
+        videoFormat.setInteger(MediaFormat.KEY_BITRATE_MODE,
+            MediaCodecInfo.EncoderCapabilities.BITRATE_MODE_CBR);
+      } else {
+        Log.i(TAG, "bitrate mode CBR not supported using default mode");
+      }
+      // Rotation by encoder.
+      // Removed because this is ignored by most encoders, producing different results on different devices
+      //  videoFormat.setInteger(MediaFormat.KEY_ROTATION, rotation);
+
+      if (this.profile > 0) {
+        // MediaFormat.KEY_PROFILE, API > 21
+        videoFormat.setInteger("profile", this.profile);
+      }
+      if (this.level > 0) {
+        // MediaFormat.KEY_LEVEL, API > 23
+        videoFormat.setInteger("level", this.level);
+      }
+      setCallback();
+      codec.configure(videoFormat, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE);
+      running = false;
+      if (formatVideoEncoder == FormatVideoEncoder.SURFACE
+          && Build.VERSION.SDK_INT >= Build.VERSION_CODES.JELLY_BEAN_MR2) {
+        isBufferMode = false;
+        inputSurface = codec.createInputSurface();
+      }
+      Log.i(TAG, "prepared");
+      prepared = true;
+      return true;
+    } catch (Exception e) {
+      Log.e(TAG, "Create VideoEncoder failed.", e);
+      this.stop();
+      return false;
+    }
+  }
+
+  @Override
+  public void start(boolean resetTs) {
+    if (resetTs) firstTimestamp = 0;
+    forceKey = false;
+    shouldReset = resetTs;
+    spsPpsSetted = false;
+    if (formatVideoEncoder != FormatVideoEncoder.SURFACE) {
+      YUVUtil.preAllocateBuffers(width * height * 3 / 2);
+    }
+    Log.i(TAG, "started");
+  }
+
+  @Override
+  protected void stopImp() {
+    spsPpsSetted = false;
+    if (inputSurface != null) inputSurface.release();
+    inputSurface = null;
+    oldSps = null;
+    oldPps = null;
+    oldVps = null;
+    Log.i(TAG, "stopped");
+  }
+
+  @Override
+  public boolean reset() {
+    stop(false);
+    boolean result = prepareVideoEncoder(width, height, fps, bitRate, rotation, iFrameInterval, formatVideoEncoder,
+        profile, level);
+    if (!result) return false;
+    restart();
+    return true;
+  }
+
+  private FormatVideoEncoder chooseColorDynamically(MediaCodecInfo mediaCodecInfo) {
+    for (int color : mediaCodecInfo.getCapabilitiesForType(type).colorFormats) {
+      if (color == FormatVideoEncoder.YUV420PLANAR.getFormatCodec()) {
+        return FormatVideoEncoder.YUV420PLANAR;
+      } else if (color == FormatVideoEncoder.YUV420SEMIPLANAR.getFormatCodec()) {
+        return FormatVideoEncoder.YUV420SEMIPLANAR;
+      }
+    }
+    return null;
+  }
+
+  /**
+   * Prepare encoder with default parameters
+   */
+  public boolean prepareVideoEncoder() {
+    return prepareVideoEncoder(width, height, fps, bitRate, rotation, iFrameInterval,
+        formatVideoEncoder, profile, level);
+  }
+
+  @RequiresApi(api = Build.VERSION_CODES.KITKAT)
+  public void setVideoBitrateOnFly(int bitrate) {
+    if (isRunning()) {
+      this.bitRate = bitrate;
+      Bundle bundle = new Bundle();
+      bundle.putInt(MediaCodec.PARAMETER_KEY_VIDEO_BITRATE, bitrate);
+      try {
+        codec.setParameters(bundle);
+      } catch (IllegalStateException e) {
+        Log.e(TAG, "encoder need be running", e);
+      }
+    }
+  }
+
+  @RequiresApi(api = Build.VERSION_CODES.KITKAT)
+  public void requestKeyframe() {
+    if (isRunning()) {
+      if (spsPpsSetted && oldSps != null) {
+        Bundle bundle = new Bundle();
+        bundle.putInt(MediaCodec.PARAMETER_KEY_REQUEST_SYNC_FRAME, 0);
+        try {
+          codec.setParameters(bundle);
+          getVideoData.onVideoInfo(oldSps, oldPps, oldVps);
+        } catch (IllegalStateException e) {
+          Log.e(TAG, "encoder need be running", e);
+        }
+      } else {
+        //You need wait until encoder generate first frame.
+        spsPpsSetted = false;
+        forceKey = true;
+      }
+    }
+  }
+
+  public Surface getInputSurface() {
+    return inputSurface;
+  }
+
+  public void setInputSurface(Surface inputSurface) {
+    this.inputSurface = inputSurface;
+  }
+
+  public int getWidth() {
+    return width;
+  }
+
+  public int getHeight() {
+    return height;
+  }
+
+  public int getRotation() {
+    return rotation;
+  }
+
+  public void setFps(int fps) {
+    this.fps = fps;
+  }
+
+  public void setRotation(int rotation) {
+    this.rotation = rotation;
+  }
+
+  public int getFps() {
+    return fps;
+  }
+
+  public int getBitRate() {
+    return bitRate;
+  }
+
+  public void setForceFps(int fps) {
+    fpsLimiter.setFPS(fps);
+  }
+
+  @Override
+  public void inputYUVData(@NonNull Frame frame) {
+    if (running && !queue.offer(frame)) {
+      Log.i(TAG, "frame discarded");
+    }
+  }
+
+  private boolean sendSPSandPPS(MediaFormat mediaFormat) {
+    //AV1
+    if (type.equals(CodecUtil.AV1_MIME)) {
+      ByteBuffer bufferInfo = mediaFormat.getByteBuffer("csd-0");
+      //we need an av1ConfigurationRecord with sequenceObu to work
+      if (bufferInfo != null && bufferInfo.remaining() > 4) {
+        oldSps = bufferInfo;
+        getVideoData.onVideoInfo(bufferInfo, null, null);
+        return true;
+      }
+      //H265
+    } else if (type.equals(CodecUtil.H265_MIME)) {
+      ByteBuffer bufferInfo = mediaFormat.getByteBuffer("csd-0");
+      if (bufferInfo != null) {
+        List<ByteBuffer> byteBufferList = extractVpsSpsPpsFromH265(bufferInfo);
+        oldSps = byteBufferList.get(1);
+        oldPps = byteBufferList.get(2);
+        oldVps = byteBufferList.get(0);
+        getVideoData.onVideoInfo(oldSps, oldPps, oldVps);
+        return true;
+      }
+      //H264
+    } else {
+      ByteBuffer sps = mediaFormat.getByteBuffer("csd-0");
+      ByteBuffer pps = mediaFormat.getByteBuffer("csd-1");
+      if (sps != null && pps != null) {
+        oldSps = sps;
+        oldPps = pps;
+        oldVps = null;
+        getVideoData.onVideoInfo(oldSps, oldPps, oldVps);
+        return true;
+      }
+    }
+    return false;
+  }
+
+  /**
+   * choose the video encoder by mime.
+   */
+  @Override
+  protected MediaCodecInfo chooseEncoder(String mime) {
+    List<MediaCodecInfo> mediaCodecInfoList;
+    if (codecType == CodecUtil.CodecType.HARDWARE) {
+      mediaCodecInfoList = CodecUtil.getAllHardwareEncoders(mime, true);
+    } else if (codecType == CodecUtil.CodecType.SOFTWARE) {
+      mediaCodecInfoList = CodecUtil.getAllSoftwareEncoders(mime, true);
+    } else if (codecType == CodecUtil.CodecType.CBR_PRIORITY) {
+      //Priority: hardware CBR > software CBR > hardware > software
+      mediaCodecInfoList = CodecUtil.getAllEncodersCbrPriority(mime);
+    } else {
+      //Priority: hardware CBR > hardware > software CBR > software
+      mediaCodecInfoList = CodecUtil.getAllEncoders(mime, true, true);
     }
 
-    /**
-     * choose the video encoder by mime.
-     */
-    @Override
-    protected MediaCodecInfo chooseEncoder(String mime) {
-        List<MediaCodecInfo> mediaCodecInfoList;
-        if (codecType == CodecUtil.CodecType.HARDWARE) {
-            mediaCodecInfoList = CodecUtil.getAllHardwareEncoders(mime, true);
-        } else if (codecType == CodecUtil.CodecType.SOFTWARE) {
-            mediaCodecInfoList = CodecUtil.getAllSoftwareEncoders(mime, true);
-        } else if (codecType == CodecUtil.CodecType.CBR_PRIORITY) {
-            //Priority: hardware CBR > software CBR > hardware > software
-            mediaCodecInfoList = CodecUtil.getAllEncodersCbrPriority(mime);
+    Log.i(TAG, mediaCodecInfoList.size() + " encoders found");
+    for (MediaCodecInfo mci : mediaCodecInfoList) {
+      Log.i(TAG, "Encoder " + mci.getName());
+      MediaCodecInfo.CodecCapabilities codecCapabilities = mci.getCapabilitiesForType(mime);
+      for (int color : codecCapabilities.colorFormats) {
+        Log.i(TAG, "Color supported: " + color);
+        if (formatVideoEncoder == FormatVideoEncoder.SURFACE) {
+          if (color == FormatVideoEncoder.SURFACE.getFormatCodec()) return mci;
         } else {
-            //Priority: hardware CBR > hardware > software CBR > software
-            mediaCodecInfoList = CodecUtil.getAllEncoders(mime, true, true);
+          //check if encoder support any yuv420 color
+          if (color == FormatVideoEncoder.YUV420PLANAR.getFormatCodec()
+              || color == FormatVideoEncoder.YUV420SEMIPLANAR.getFormatCodec()) {
+            return mci;
+          }
         }
-
-        Log.i(TAG, mediaCodecInfoList.size() + " encoders found");
-        for (MediaCodecInfo mci : mediaCodecInfoList) {
-            Log.i(TAG, "Encoder " + mci.getName());
-            MediaCodecInfo.CodecCapabilities codecCapabilities = mci.getCapabilitiesForType(mime);
-            for (int color : codecCapabilities.colorFormats) {
-                Log.i(TAG, "Color supported: " + color);
-                if (formatVideoEncoder == FormatVideoEncoder.SURFACE) {
-                    if (color == FormatVideoEncoder.SURFACE.getFormatCodec()) return mci;
-                } else {
-                    //check if encoder support any yuv420 color
-                    if (color == FormatVideoEncoder.YUV420PLANAR.getFormatCodec()
-                            || color == FormatVideoEncoder.YUV420SEMIPLANAR.getFormatCodec()) {
-                        return mci;
-                    }
-                }
-            }
-        }
-        return null;
+      }
     }
+    return null;
+  }
 
-    /**
-     * decode sps and pps if the encoder never call to MediaCodec.INFO_OUTPUT_FORMAT_CHANGED
-     */
-    private Pair<ByteBuffer, ByteBuffer> decodeSpsPpsFromBuffer(ByteBuffer outputBuffer, int length) {
-        byte[] csd = new byte[length];
-        outputBuffer.get(csd, 0, length);
-        outputBuffer.rewind();
-        int i = 0;
-        int spsIndex = -1;
-        int ppsIndex = -1;
-        while (i < length - 4) {
-            if (csd[i] == 0 && csd[i + 1] == 0 && csd[i + 2] == 0 && csd[i + 3] == 1) {
-                if (spsIndex == -1) {
-                    spsIndex = i;
-                } else {
-                    ppsIndex = i;
-                    break;
-                }
-            }
-            i++;
+  /**
+   * decode sps and pps if the encoder never call to MediaCodec.INFO_OUTPUT_FORMAT_CHANGED
+   */
+  private Pair<ByteBuffer, ByteBuffer> decodeSpsPpsFromBuffer(ByteBuffer outputBuffer, int length) {
+    byte[] csd = new byte[length];
+    outputBuffer.get(csd, 0, length);
+    outputBuffer.rewind();
+    int i = 0;
+    int spsIndex = -1;
+    int ppsIndex = -1;
+    while (i < length - 4) {
+      if (csd[i] == 0 && csd[i + 1] == 0 && csd[i + 2] == 0 && csd[i + 3] == 1) {
+        if (spsIndex == -1) {
+          spsIndex = i;
+        } else {
+          ppsIndex = i;
+          break;
         }
-        if (spsIndex != -1 && ppsIndex != -1) {
-            byte[] sps = new byte[ppsIndex];
-            System.arraycopy(csd, spsIndex, sps, 0, ppsIndex);
-            byte[] pps = new byte[length - ppsIndex];
-            System.arraycopy(csd, ppsIndex, pps, 0, length - ppsIndex);
-            return new Pair<>(ByteBuffer.wrap(sps), ByteBuffer.wrap(pps));
-        }
-        return null;
+      }
+      i++;
     }
+    if (spsIndex != -1 && ppsIndex != -1) {
+      byte[] sps = new byte[ppsIndex];
+      System.arraycopy(csd, spsIndex, sps, 0, ppsIndex);
+      byte[] pps = new byte[length - ppsIndex];
+      System.arraycopy(csd, ppsIndex, pps, 0, length - ppsIndex);
+      return new Pair<>(ByteBuffer.wrap(sps), ByteBuffer.wrap(pps));
+    }
+    return null;
+  }
 
     /**
      * You need find 0 0 0 1 byte sequence that is the initiation of vps, sps and pps
