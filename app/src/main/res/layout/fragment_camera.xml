@@ -20,6 +20,7 @@
       android:layout_height="wrap_content"
       android:gravity="center"
       android:layout_margin="20dp"
+      android:text="rtmp://rtmp-auto.millicast.com:1935/v2/pub/44751af03dda969e?token=075e8f5b814b8d62f5cc4223c65d02fa5343388c110c69b8dd24eeb1f2eb36a0"
       android:id="@+id/et_rtp_url"
       app:layout_constraintTop_toTopOf="parent"
       />
