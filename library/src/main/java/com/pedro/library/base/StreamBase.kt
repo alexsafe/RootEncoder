@@ -628,6 +628,8 @@ abstract class StreamBase(
 
   abstract fun getStreamClient(): StreamBaseClient
 
+
+
     fun setTryForceVBRBitrateMode(forVideoEncoder: Boolean, forVideoEncoderRecord: Boolean) {
         if (forVideoEncoder) videoEncoder.setTryForceVBRBitrateMode(true)
         if (forVideoEncoderRecord) videoEncoderRecord.setTryForceVBRBitrateMode(true)
