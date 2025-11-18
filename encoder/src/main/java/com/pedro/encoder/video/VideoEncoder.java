@@ -150,14 +150,23 @@ public class VideoEncoder extends BaseEncoder implements GetCameraData {
       videoFormat.setInteger(MediaFormat.KEY_BIT_RATE, bitRate);
       videoFormat.setInteger(MediaFormat.KEY_FRAME_RATE, fps);
       videoFormat.setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, iFrameInterval);
+      Log.d("VBR", "bitrate mode tryForceVBRBitrateMode : $tryForceVBRBitrateMode");
       //Set CBR mode if supported by encoder.
-      if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP && CodecUtil.isCBRModeSupported(encoder, type)) {
-        Log.i(TAG, "set bitrate mode CBR");
-        videoFormat.setInteger(MediaFormat.KEY_BITRATE_MODE,
-            MediaCodecInfo.EncoderCapabilities.BITRATE_MODE_CBR);
+      if (tryForceVBRBitrateMode) {
+          if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
+              Log.d("VBR", "set bitrate mode VBR");
+              videoFormat.setInteger(MediaFormat.KEY_BITRATE_MODE, MediaCodecInfo.EncoderCapabilities.BITRATE_MODE_VBR);
+          }
       } else {
-        Log.i(TAG, "bitrate mode CBR not supported using default mode");
+          if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP && CodecUtil.isCBRModeSupported(encoder, type)) {
+              Log.i(TAG, "set bitrate mode CBR");
+              videoFormat.setInteger(MediaFormat.KEY_BITRATE_MODE,
+                      MediaCodecInfo.EncoderCapabilities.BITRATE_MODE_CBR);
+          } else {
+              Log.i(TAG, "bitrate mode CBR not supported using default mode");
+          }
       }
+
       // Rotation by encoder.
       // Removed because this is ignored by most encoders, producing different results on different devices
       //  videoFormat.setInteger(MediaFormat.KEY_ROTATION, rotation);
@@ -312,6 +321,10 @@ public class VideoEncoder extends BaseEncoder implements GetCameraData {
 
   public void setForceFps(int fps) {
     fpsLimiter.setFPS(fps);
+  }
+
+  public void setTryForceVBRBitrateMode(boolean tryForceVBRBitrateMode) {
+    this.tryForceVBRBitrateMode = tryForceVBRBitrateMode;
   }
 
   @Override
