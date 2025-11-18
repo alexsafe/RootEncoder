@@ -419,8 +419,8 @@ public class CodecUtil {
                 MediaCodecInfo.EncoderCapabilities.BITRATE_MODE_CBR);
         Boolean isVbrSupported = encoderCapabilities.isBitrateModeSupported(
                 MediaCodecInfo.EncoderCapabilities.BITRATE_MODE_CBR);
-        Log.d("VBR", "isCBRModeSupported: $isCbrSupported");
-        Log.d("VBR", "isVbrSupported: $isVbrSupported");
+        Log.d("VBR", "isCBRModeSupported: " + isCbrSupported);
+        Log.d("VBR", "isVbrSupported: " + isVbrSupported);
         return isCbrSupported;
     }
     return false;
