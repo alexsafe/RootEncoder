@@ -627,6 +627,11 @@ abstract class StreamBase(
 
   abstract fun getStreamClient(): StreamBaseClient
 
+    fun setTryForceVBRBitrateMode(forVideoEncoder: Boolean, forVideoEncoderRecord: Boolean) {
+        if (forVideoEncoder) videoEncoder.setTryForceVBRBitrateMode(true)
+        if (forVideoEncoderRecord) videoEncoderRecord.setTryForceVBRBitrateMode(true)
+    }
+
     fun setVideoRecCodec(codec: VideoCodec) {
 
         recordController.setVideoCodec(codec)
@@ -638,6 +643,7 @@ abstract class StreamBase(
         CodecUtil.showAllCodecsInfo()
         videoEncoderRecord.type = type
     }
+
 
   /**
    * Change VideoCodec used.

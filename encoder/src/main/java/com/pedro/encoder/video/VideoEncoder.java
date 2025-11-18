@@ -74,6 +74,7 @@ public class VideoEncoder extends BaseEncoder implements GetCameraData {
   private FormatVideoEncoder formatVideoEncoder = FormatVideoEncoder.YUV420Dynamical;
   private int profile = -1;
   private int level = -1;
+  private boolean tryForceVBRBitrateMode = false;
 
   public VideoEncoder(GetVideoData getVideoData) {
     this.getVideoData = getVideoData;
@@ -85,7 +86,7 @@ public class VideoEncoder extends BaseEncoder implements GetCameraData {
   public boolean prepareVideoEncoder(int width, int height, int fps, int bitRate, int rotation,
       int iFrameInterval, FormatVideoEncoder formatVideoEncoder) {
     return prepareVideoEncoder(width, height, fps, bitRate, rotation, iFrameInterval,
-        formatVideoEncoder, -1, -1, false);
+        formatVideoEncoder, -1, -1);
   }
 
   /**
@@ -93,7 +94,7 @@ public class VideoEncoder extends BaseEncoder implements GetCameraData {
    */
   public boolean prepareVideoEncoder(int width, int height, int fps, int bitRate, int rotation,
       int iFrameInterval, FormatVideoEncoder formatVideoEncoder, int profile,
-      int level, boolean setVBRBitrateMode) {
+      int level) {
     if (prepared) stop();
 
     if (width % 2 != 0) {
@@ -150,8 +151,9 @@ public class VideoEncoder extends BaseEncoder implements GetCameraData {
       videoFormat.setInteger(MediaFormat.KEY_FRAME_RATE, fps);
 
       videoFormat.setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, iFrameInterval);
+      Log.d("VBR", "bitrate mode tryForceVBRBitrateMode : $tryForceVBRBitrateMode");
       //Set CBR mode if supported by encoder.
-      if (setVBRBitrateMode) {
+      if (tryForceVBRBitrateMode) {
           if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
               Log.d("VBR", "set bitrate mode VBR");
               videoFormat.setInteger(MediaFormat.KEY_BITRATE_MODE, MediaCodecInfo.EncoderCapabilities.BITRATE_MODE_VBR);
@@ -223,7 +225,7 @@ public class VideoEncoder extends BaseEncoder implements GetCameraData {
   public boolean reset() {
     stop(false);
     boolean result = prepareVideoEncoder(width, height, fps, bitRate, rotation, iFrameInterval, formatVideoEncoder,
-        profile, level, false);
+        profile, level);
     if (!result) return false;
     restart();
     return true;
@@ -245,7 +247,7 @@ public class VideoEncoder extends BaseEncoder implements GetCameraData {
    */
   public boolean prepareVideoEncoder() {
     return prepareVideoEncoder(width, height, fps, bitRate, rotation, iFrameInterval,
-        formatVideoEncoder, profile, level, false);
+        formatVideoEncoder, profile, level);
   }
 
   @RequiresApi(api = Build.VERSION_CODES.KITKAT)
@@ -320,6 +322,10 @@ public class VideoEncoder extends BaseEncoder implements GetCameraData {
 
   public void setForceFps(int fps) {
     fpsLimiter.setFPS(fps);
+  }
+
+  public void setTryForceVBRBitrateMode(boolean tryForceVBRBitrateMode) {
+    this.tryForceVBRBitrateMode = tryForceVBRBitrateMode;
   }
 
   @Override
