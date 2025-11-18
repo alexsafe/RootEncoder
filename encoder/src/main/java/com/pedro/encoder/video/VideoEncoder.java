@@ -29,6 +29,7 @@ import android.view.Surface;
 import androidx.annotation.NonNull;
 import androidx.annotation.RequiresApi;
 
+import com.pedro.common.BitrateManager;
 import com.pedro.common.TimeUtils;
 import com.pedro.common.av1.Av1Parser;
 import com.pedro.common.av1.Obu;
