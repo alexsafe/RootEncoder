@@ -29,6 +29,7 @@ import android.view.Surface;
 import androidx.annotation.NonNull;
 import androidx.annotation.RequiresApi;
 
+import com.pedro.common.BitrateManager;
 import com.pedro.common.TimeUtils;
 import com.pedro.common.av1.Av1Parser;
 import com.pedro.common.av1.Obu;
@@ -84,7 +85,7 @@ public class VideoEncoder extends BaseEncoder implements GetCameraData {
   public boolean prepareVideoEncoder(int width, int height, int fps, int bitRate, int rotation,
       int iFrameInterval, FormatVideoEncoder formatVideoEncoder) {
     return prepareVideoEncoder(width, height, fps, bitRate, rotation, iFrameInterval,
-        formatVideoEncoder, -1, -1);
+        formatVideoEncoder, -1, -1, false);
   }
 
   /**
@@ -92,7 +93,7 @@ public class VideoEncoder extends BaseEncoder implements GetCameraData {
    */
   public boolean prepareVideoEncoder(int width, int height, int fps, int bitRate, int rotation,
       int iFrameInterval, FormatVideoEncoder formatVideoEncoder, int profile,
-      int level) {
+      int level, boolean setVBRBitrateMode) {
     if (prepared) stop();
 
     if (width % 2 != 0) {
@@ -147,19 +148,24 @@ public class VideoEncoder extends BaseEncoder implements GetCameraData {
       videoFormat.setInteger(MediaFormat.KEY_MAX_INPUT_SIZE, 0);
       videoFormat.setInteger(MediaFormat.KEY_BIT_RATE, bitRate);
       videoFormat.setInteger(MediaFormat.KEY_FRAME_RATE, fps);
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
-            Log.d("VBR", "set bitrate mode VBR");
-            videoFormat.setInteger(MediaFormat.KEY_BITRATE_MODE, MediaCodecInfo.EncoderCapabilities.BITRATE_MODE_VBR);
-        }
-        videoFormat.setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, iFrameInterval);
+
+      videoFormat.setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, iFrameInterval);
       //Set CBR mode if supported by encoder.
-      if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP && CodecUtil.isCBRModeSupported(encoder, type)) {
-        Log.i(TAG, "set bitrate mode CBR");
-        videoFormat.setInteger(MediaFormat.KEY_BITRATE_MODE,
-            MediaCodecInfo.EncoderCapabilities.BITRATE_MODE_CBR);
+      if (setVBRBitrateMode) {
+          if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
+              Log.d("VBR", "set bitrate mode VBR");
+              videoFormat.setInteger(MediaFormat.KEY_BITRATE_MODE, MediaCodecInfo.EncoderCapabilities.BITRATE_MODE_VBR);
+          }
       } else {
-        Log.i(TAG, "bitrate mode CBR not supported using default mode");
+          if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP && CodecUtil.isCBRModeSupported(encoder, type)) {
+              Log.i(TAG, "set bitrate mode CBR");
+              videoFormat.setInteger(MediaFormat.KEY_BITRATE_MODE,
+                      MediaCodecInfo.EncoderCapabilities.BITRATE_MODE_CBR);
+          } else {
+              Log.i(TAG, "bitrate mode CBR not supported using default mode");
+          }
       }
+
       // Rotation by encoder.
       // Removed because this is ignored by most encoders, producing different results on different devices
       //  videoFormat.setInteger(MediaFormat.KEY_ROTATION, rotation);
@@ -217,7 +223,7 @@ public class VideoEncoder extends BaseEncoder implements GetCameraData {
   public boolean reset() {
     stop(false);
     boolean result = prepareVideoEncoder(width, height, fps, bitRate, rotation, iFrameInterval, formatVideoEncoder,
-        profile, level);
+        profile, level, false);
     if (!result) return false;
     restart();
     return true;
@@ -239,7 +245,7 @@ public class VideoEncoder extends BaseEncoder implements GetCameraData {
    */
   public boolean prepareVideoEncoder() {
     return prepareVideoEncoder(width, height, fps, bitRate, rotation, iFrameInterval,
-        formatVideoEncoder, profile, level);
+        formatVideoEncoder, profile, level, false);
   }
 
   @RequiresApi(api = Build.VERSION_CODES.KITKAT)
