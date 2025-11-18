@@ -144,6 +144,7 @@ abstract class StreamBase(
       glInterface.setCameraOrientation(if (rotation == 0) 270 else rotation - 90)
       glInterface.setOrientationConfig(videoSource.getOrientationConfig())
       if (differentRecordResolution) {
+          videoEncoderRecord.setTryForceVBRBitrateMode(true)
         val result = videoEncoderRecord.prepareVideoEncoder(recordWidth, recordHeight, fps, recordBitrate, rotation,
           iFrameInterval, FormatVideoEncoder.SURFACE, profile, level)
         if (!result) return false
@@ -641,7 +642,7 @@ abstract class StreamBase(
             VideoCodec.AV1 -> CodecUtil.AV1_MIME
         }
         CodecUtil.showAllCodecsInfo()
-        videoEncoderRecord.setTryForceVBRBitrateMode(true)
+//        videoEncoderRecord.setTryForceVBRBitrateMode(true)
 //        videoEncoderRecord.
         videoEncoderRecord.type = type
     }
