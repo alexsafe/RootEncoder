@@ -21,6 +21,7 @@ import android.graphics.SurfaceTexture
 import android.media.MediaCodec
 import android.media.MediaFormat
 import android.os.Build
+import android.util.Log
 import android.util.Size
 import android.view.Surface
 import android.view.SurfaceView
@@ -265,6 +266,7 @@ abstract class StreamBase(
     val usedTracks = tracks ?: if (videoSource is NoVideoSource) RecordController.RecordTracks.AUDIO
         else if (audioSource is NoAudioSource) RecordController.RecordTracks.VIDEO
         else RecordController.RecordTracks.ALL
+      Log.d("StreamBase", "startRecord $path $usedTracks recordController: $recordController")
     recordController.setRequestKeyFrame {
       videoEncoder.requestKeyframe()
       videoEncoderRecord.requestKeyframe()

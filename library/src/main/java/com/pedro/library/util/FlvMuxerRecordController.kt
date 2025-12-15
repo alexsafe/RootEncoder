@@ -60,18 +60,21 @@ class FlvMuxerRecordController: BaseRecordController() {
     private var sendInfo = false
 
     override fun startRecord(path: String, listener: RecordController.Listener?, tracks: RecordTracks) {
+        Log.d("FlvMuxerRecordController", "startRecord 1 $path")
         this.tracks = tracks
         outputStream = FileOutputStream(path)
         start(listener)
     }
 
     override fun startRecord(fd: FileDescriptor, listener: RecordController.Listener?, tracks: RecordTracks) {
+        Log.d("FlvMuxerRecordController", "startRecord 2")
         this.tracks = tracks
         outputStream = FileOutputStream(fd)
         start(listener)
     }
 
     private fun start(listener: RecordController.Listener?) {
+        Log.d("FlvMuxerRecordController", "startRecord start listener $listener")
         audioPacket = when (audioCodec) {
             AudioCodec.G711 -> G711Packet()
             AudioCodec.AAC -> AacPacket().apply { sendAudioInfo(sampleRate, isStereo) }

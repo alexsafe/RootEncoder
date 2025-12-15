@@ -19,6 +19,7 @@ package com.pedro.streamer.rotation
 import android.annotation.SuppressLint
 import android.os.Build
 import android.os.Bundle
+import android.util.Log
 import android.view.LayoutInflater
 import android.view.SurfaceHolder
 import android.view.SurfaceView
@@ -30,12 +31,14 @@ import android.widget.TextView
 import androidx.annotation.RequiresApi
 import androidx.fragment.app.Fragment
 import com.pedro.common.ConnectChecker
+import com.pedro.common.VideoCodec
 import com.pedro.encoder.input.sources.video.Camera1Source
 import com.pedro.encoder.input.sources.video.Camera2Source
 import com.pedro.extrasources.CameraXSource
 import com.pedro.library.base.recording.RecordController
 import com.pedro.library.generic.GenericStream
 import com.pedro.library.util.BitrateAdapter
+import com.pedro.library.util.FlvMuxerRecordController
 import com.pedro.streamer.R
 import com.pedro.streamer.utils.PathUtils
 import com.pedro.streamer.utils.toast
@@ -141,10 +144,15 @@ class CameraFragment: Fragment(), ConnectChecker {
         val folder = PathUtils.getRecordPath()
         if (!folder.exists()) folder.mkdir()
         val sdf = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.getDefault())
-        recordPath = "${folder.absolutePath}/${sdf.format(Date())}.mp4"
+        recordPath = "${folder.absolutePath}/root_${sdf.format(Date())}.mp4"
         bRecord.setImageResource(R.drawable.pause_icon)
+          val recordController = FlvMuxerRecordController()
+          genericStream.setRecordController(recordController)
+//          recordController.setVideoCodec(VideoCodec.H265)
         genericStream.startRecord(recordPath) { status ->
           if (status == RecordController.Status.RECORDING) {
+              Log.d("CameraFragment", "Recording started")
+
             bRecord.setImageResource(R.drawable.stop_icon)
           }
         }

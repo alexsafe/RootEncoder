@@ -48,6 +48,7 @@ public class AndroidMuxerRecordController extends BaseRecordController {
 
   @Override
   public void startRecord(@NonNull String path, @Nullable Listener listener, RecordTracks tracks) throws IOException {
+      Log.d(TAG, "startRecord 1: $path");
     this.tracks = tracks;
     if (audioCodec != AudioCodec.AAC) {
       throw new IOException("Unsupported AudioCodec: " + audioCodec.name());
@@ -67,6 +68,7 @@ public class AndroidMuxerRecordController extends BaseRecordController {
   @Override
   @RequiresApi(api = Build.VERSION_CODES.O)
   public void startRecord(@NonNull FileDescriptor fd, @Nullable Listener listener, RecordTracks tracks) throws IOException {
+      Log.d(TAG, "startRecord 2: $path");
     this.tracks = tracks;
     if (audioCodec != AudioCodec.AAC) {
       throw new IOException("Unsupported AudioCodec: " + audioCodec.name());
