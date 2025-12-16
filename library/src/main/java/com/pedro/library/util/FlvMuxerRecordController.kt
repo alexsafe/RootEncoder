@@ -61,6 +61,9 @@ class FlvMuxerRecordController: BaseRecordController() {
     private var lastCsd0: ByteBuffer? = null
     private val preConfigBuffer = ArrayDeque<MediaFrame>()
     private val MAX_PRECONFIG = 50
+    // Fallback: how long to wait for codec CONFIG before forcing a best-effort extraction (ms)
+    private var preConfigStartMs: Long = 0L
+    private val CONFIG_TIMEOUT_MS = 2000L
 
     override fun startRecord(path: String, listener: RecordController.Listener?, tracks: RecordTracks) {
         Log.d(logTag, "startRecord 1 $path")
@@ -150,7 +153,8 @@ class FlvMuxerRecordController: BaseRecordController() {
                 if (!sendInfo) {
                     when (videoPacket) {
                         is H264Packet -> {
-                            val buffers = VideoEncoderHelper.decodeSpsPpsFromBuffer(videoBuffer.duplicate(), videoInfo.size)
+                            val rawBuffers = VideoEncoderHelper.decodeSpsPpsFromBuffer(videoBuffer.duplicate(), videoInfo.size)
+                            val buffers = normalizePairToKotlin(rawBuffers)
                             if (buffers != null) {
                                 val oldSps = buffers.first
                                 val oldPps = buffers.second
@@ -162,16 +166,32 @@ class FlvMuxerRecordController: BaseRecordController() {
                             }
                         }
                         is H265Packet -> {
-                            val byteBufferList = VideoEncoderHelper.extractVpsSpsPpsFromH265(videoBuffer.duplicate())
+                            // Try robust extraction (Annex-B, length-prefixed or hvcC-aware)
+                            val byteBufferList = extractH265ParamSets(videoBuffer.duplicate())
                             if (byteBufferList.size == 3) {
+                                val oldVps = byteBufferList[0]
                                 val oldSps = byteBufferList[1]
                                 val oldPps = byteBufferList[2]
-                                val oldVps = byteBufferList[0]
                                 (videoPacket as H265Packet).sendVideoInfo(oldSps, oldPps, oldVps)
                                 sendInfo = true
                                 Log.i("checkflv", "sendInfo=true codec=H265 from keyframe in recordVideo")
                             } else {
-                                Log.e(logTag, "manual vps/sps/pps extraction failed")
+                                // As a last attempt, try the helper (some devices use different layouts)
+                                try {
+                                    val helperList = VideoEncoderHelper.extractVpsSpsPpsFromH265(videoBuffer.duplicate())
+                                    if (helperList != null && helperList.size == 3) {
+                                        val oldVps = helperList[0]
+                                        val oldSps = helperList[1]
+                                        val oldPps = helperList[2]
+                                        (videoPacket as H265Packet).sendVideoInfo(oldSps, oldPps, oldVps)
+                                        sendInfo = true
+                                        Log.i("checkflv", "sendInfo=true codec=H265 from keyframe via helper fallback")
+                                    } else {
+                                        Log.e(logTag, "manual vps/sps/pps extraction failed")
+                                    }
+                                } catch (e: Exception) {
+                                    Log.e(logTag, "manual vps/sps/pps extraction failed: ${e.message}")
+                                }
                             }
                         }
                         is Av1Packet -> {
@@ -205,14 +225,168 @@ class FlvMuxerRecordController: BaseRecordController() {
                             preConfigBuffer.removeFirst()
                             Log.w("checkflv", "preConfigBuffer full, dropping oldest frame")
                         }
+                        if (preConfigStartMs == 0L) preConfigStartMs = System.currentTimeMillis()
                         preConfigBuffer.addLast(frame)
                         Log.v("checkflv", "buffering pre-config frame tsUs=${frame.info.timestamp} size=${frame.data.remaining()} bufCount=${preConfigBuffer.size}")
+                        // If we've buffered enough frames or waited too long, try to force-send a config
+                        val waited = System.currentTimeMillis() - preConfigStartMs
+                        if (preConfigBuffer.size >= MAX_PRECONFIG || waited >= CONFIG_TIMEOUT_MS) {
+                            Log.w("checkflv", "preConfigBuffer reached threshold or timeout (size=${preConfigBuffer.size}, waited=${waited}ms) - attempting forced config & flush")
+                            try {
+                                forceSendConfig()
+                            } catch (e: Exception) {
+                                Log.e("checkflv", "forceSendConfig failed: ${e.message}")
+                                // In extreme failure, flush buffered frames to avoid 210B files (best-effort)
+                                while (preConfigBuffer.isNotEmpty()) {
+                                    val f = preConfigBuffer.removeFirst()
+                                    queue.trySend(f)
+                                }
+                                preConfigStartMs = 0L
+                            }
+                        }
                     }
                 } else {
                     queue.trySend(frame)
                     Log.v("checkflv", "recordVideo(RECORDING) enqueue tsUs=${videoInfo.presentationTimeUs} size=${videoInfo.size}")
                 }
             }
+        }
+    }
+
+    // Attempt a best-effort extraction of codec config from lastCsd0 or from the earliest buffered frame.
+    // If successful, set sendInfo=true, configure videoPacket, write metadata and flush preConfigBuffer to queue.
+    private fun forceSendConfig() {
+        synchronized(preConfigBuffer) {
+            if (sendInfo) {
+                preConfigStartMs = 0L
+                return
+            }
+            Log.i("checkflv", "forceSendConfig: trying to recover codec config")
+            var configured = false
+            // 1) Try lastCsd0 if available
+            lastCsd0?.duplicate()?.let { csd ->
+                try {
+                    val det = detectCodecFromBuffer(csd)
+                    if (det == VideoCodec.H264) {
+                        val h = extractH264ParamSets(csd)
+                        if (h != null) {
+                            videoPacket = H264Packet()
+                            videoCodec = VideoCodec.H264
+                            (videoPacket as H264Packet).sendVideoInfo(h.first, h.second)
+                            configured = true
+                            Log.i("checkflv", "forceSendConfig: configured H264 from lastCsd0")
+                        }
+                    } else if (det == VideoCodec.H265) {
+                        val list = extractH265ParamSets(csd)
+                        if (list.size == 3) {
+                            videoPacket = H265Packet()
+                            videoCodec = VideoCodec.H265
+                            (videoPacket as H265Packet).sendVideoInfo(list[1], list[2], list[0])
+                            configured = true
+                            Log.i("checkflv", "forceSendConfig: configured H265 from lastCsd0")
+                        } else {
+                            // try hvcC parser
+                            val list2 = parseHvcC(csd)
+                            if (list2.size == 3) {
+                                videoPacket = H265Packet()
+                                videoCodec = VideoCodec.H265
+                                (videoPacket as H265Packet).sendVideoInfo(list2[1], list2[2], list2[0])
+                                configured = true
+                                Log.i("checkflv", "forceSendConfig: configured H265 from lastCsd0 via hvcC")
+                            }
+                        }
+                    }
+                } catch (e: Exception) {
+                    Log.w("checkflv", "forceSendConfig: lastCsd0 parsing failed: ${e.message}")
+                }
+            }
+
+            // 2) If still not configured, try earliest buffered frame(s)
+            if (!configured && preConfigBuffer.isNotEmpty()) {
+                val candidates = preConfigBuffer.toList()
+                for (f in candidates) {
+                    try {
+                        val buf = f.data.duplicate()
+                        val det = detectCodecFromBuffer(buf)
+                        if (det == VideoCodec.H264) {
+                            val h = extractH264ParamSets(buf)
+                            if (h != null) {
+                                videoPacket = H264Packet()
+                                videoCodec = VideoCodec.H264
+                                (videoPacket as H264Packet).sendVideoInfo(h.first, h.second)
+                                configured = true
+                                Log.i("checkflv", "forceSendConfig: configured H264 from buffered frame")
+                                break
+                            }
+                        } else if (det == VideoCodec.H265) {
+                            val list = extractH265ParamSets(buf)
+                            if (list.size == 3) {
+                                videoPacket = H265Packet()
+                                videoCodec = VideoCodec.H265
+                                (videoPacket as H265Packet).sendVideoInfo(list[1], list[2], list[0])
+                                configured = true
+                                Log.i("checkflv", "forceSendConfig: configured H265 from buffered frame")
+                                break
+                            }
+                            // hvcC from csd-like buffer
+                            val list2 = parseHvcC(buf)
+                            if (list2.size == 3) {
+                                videoPacket = H265Packet()
+                                videoCodec = VideoCodec.H265
+                                (videoPacket as H265Packet).sendVideoInfo(list2[1], list2[2], list2[0])
+                                configured = true
+                                Log.i("checkflv", "forceSendConfig: configured H265 from buffered frame via hvcC")
+                                break
+                            }
+                        }
+                    } catch (e: Exception) {
+                        Log.w("checkflv", "forceSendConfig: candidate parsing failed: ${e.message}")
+                    }
+                }
+            }
+
+            // 3) Final fallback: if still not configured, but we have a detectable codec, switch packet type and proceed (without proper sendVideoInfo)
+            if (!configured) {
+                // choose codec based on first buffered frame or lastCsd0
+                val det = when {
+                    preConfigBuffer.isNotEmpty() -> detectCodecFromBuffer(preConfigBuffer.first().data.duplicate())
+                    lastCsd0 != null -> detectCodecFromBuffer(lastCsd0!!.duplicate())
+                    else -> null
+                }
+                if (det == VideoCodec.H264) {
+                    videoPacket = H264Packet()
+                    videoCodec = VideoCodec.H264
+                    Log.w("checkflv", "forceSendConfig: switched to H264 without full config (best-effort)")
+                    configured = true
+                } else if (det == VideoCodec.H265) {
+                    videoPacket = H265Packet()
+                    videoCodec = VideoCodec.H265
+                    Log.w("checkflv", "forceSendConfig: switched to H265 without full config (best-effort)")
+                    configured = true
+                }
+            }
+
+            // If configured (even best-effort), mark sendInfo and write metadata, then flush preConfigBuffer
+            if (configured) {
+                try {
+                    sendInfo = true
+                    outputStream?.let { writeFlvFileMetadata(it) }
+                } catch (e: Exception) { Log.w("checkflv", "forceSendConfig: write metadata failed: ${e.message}") }
+                val flushCount = preConfigBuffer.size
+                Log.i("checkflv", "forceSendConfig: sendInfo=true flush buffered frames=$flushCount")
+                while (preConfigBuffer.isNotEmpty()) {
+                    val f = preConfigBuffer.removeFirst()
+                    queue.trySend(f)
+                }
+            } else {
+                Log.w("checkflv", "forceSendConfig: unable to configure codec; flushing frames raw to avoid tiny file")
+                // flush raw frames to queue to avoid 210B; they may not decode but will be written
+                while (preConfigBuffer.isNotEmpty()) {
+                    val f = preConfigBuffer.removeFirst()
+                    queue.trySend(f)
+                }
+            }
+            preConfigStartMs = 0L
         }
     }
 
@@ -496,7 +670,8 @@ class FlvMuxerRecordController: BaseRecordController() {
                 videoPacket = H265Packet()
                 videoCodec = VideoCodec.H265
                 lastCsd0?.duplicate()?.let { csd ->
-                    runCatching { VideoEncoderHelper.extractVpsSpsPpsFromH265(csd) }
+                    // Try robust extraction from stored csd0
+                    runCatching { extractH265ParamSets(csd) }
                         .getOrNull()?.takeIf { it.size == 3 }?.let { list ->
                             (videoPacket as H265Packet).sendVideoInfo(list[1], list[2], list[0])
                             sendInfo = true
@@ -523,11 +698,12 @@ class FlvMuxerRecordController: BaseRecordController() {
                 is H264Packet -> {
                     try {
                         val safeBuf = prepareBufferForParsing(buffer, info.size)
-                        val buffers = VideoEncoderHelper.decodeSpsPpsFromBuffer(safeBuf, info.size)
-                        if (buffers != null) {
+                        val raw = VideoEncoderHelper.decodeSpsPpsFromBuffer(safeBuf, safeBuf.remaining())
+                        val kb = normalizePairToKotlin(raw)
+                        if (kb != null) {
                             Log.i(logTag, "✅ H264: Extracted SPS/PPS from CODEC_CONFIG buffer")
-                            val oldSps = buffers.first
-                            val oldPps = buffers.second
+                            val oldSps = kb.first
+                            val oldPps = kb.second
                             (videoPacket as H264Packet).sendVideoInfo(oldSps, oldPps)
                             sendInfo = true
                         } else {
@@ -540,7 +716,10 @@ class FlvMuxerRecordController: BaseRecordController() {
                 is H265Packet -> {
                     try {
                         val safeBuf = prepareBufferForParsing(buffer, info.size)
-                        val byteBufferList = VideoEncoderHelper.extractVpsSpsPpsFromH265(safeBuf)
+                        var byteBufferList = extractH265ParamSets(safeBuf)
+                        if (byteBufferList.isEmpty()) {
+                            byteBufferList = try { VideoEncoderHelper.extractVpsSpsPpsFromH265(safeBuf) } catch (_: Exception) { emptyList() }
+                        }
                         if (byteBufferList.size == 3) {
                             Log.i(logTag, "✅ H265: Extracted VPS/SPS/PPS from CODEC_CONFIG buffer")
                             val oldSps = byteBufferList[1]
@@ -592,24 +771,28 @@ class FlvMuxerRecordController: BaseRecordController() {
                     is H264Packet -> {
                         try {
                             val safeBuf = prepareBufferForParsing(buffer, info.size)
-                            val buffers = VideoEncoderHelper.decodeSpsPpsFromBuffer(safeBuf, info.size)
-                            if (buffers != null) {
-                                Log.i(logTag, "manual sps/pps extraction success")
-                                val oldSps = buffers.first
-                                val oldPps = buffers.second
+                            val raw = VideoEncoderHelper.decodeSpsPpsFromBuffer(safeBuf, safeBuf.remaining())
+                            val kb = normalizePairToKotlin(raw)
+                            if (kb != null) {
+                                Log.i(logTag, "✅ H264: Extracted SPS/PPS from CODEC_CONFIG buffer")
+                                val oldSps = kb.first
+                                val oldPps = kb.second
                                 (videoPacket as H264Packet).sendVideoInfo(oldSps, oldPps)
                                 sendInfo = true
                             } else {
-                                Log.w(logTag, "manual sps/pps extraction failed; will rely on csd-0/csd-1 if available")
+                                Log.w(logTag, "❌ H264: Failed to extract SPS/PPS from CODEC_CONFIG buffer")
                             }
                         } catch (e: Exception) {
-                            Log.e(logTag, "Exception during manual H264 extraction: ${e.message}")
+                            Log.e(logTag, "Exception parsing H264 CODEC_CONFIG: ${e.message}")
                         }
                     }
                     is H265Packet -> {
                         try {
                             val safeBuf = prepareBufferForParsing(buffer, info.size)
-                            val byteBufferList = VideoEncoderHelper.extractVpsSpsPpsFromH265(safeBuf)
+                            var byteBufferList = extractH265ParamSets(safeBuf)
+                            if (byteBufferList.isEmpty()) {
+                                byteBufferList = try { VideoEncoderHelper.extractVpsSpsPpsFromH265(safeBuf) } catch (_: Exception) { emptyList() }
+                            }
                             if (byteBufferList.size == 3) {
                                 Log.i(logTag, "✅ H265: Extracted VPS/SPS/PPS from keyframe (fallback method)")
                                 val oldSps = byteBufferList[1]
@@ -698,11 +881,22 @@ class FlvMuxerRecordController: BaseRecordController() {
                             videoPacket = H264Packet()
                             videoCodec = VideoCodec.H264
                             try {
-                                val h264 = extractH264ParamSets(bufferInfo.duplicate())
-                                if (h264 != null) {
-                                    (videoPacket as H264Packet).sendVideoInfo(h264.first, h264.second)
+                                // If csd-1 is present in the format, prefer using csd-0 and csd-1 directly
+                                val csd1 = videoFormat.getByteBuffer("csd-1")
+                                if (csd1 != null) {
+                                    Log.i(logTag, "Recovering by switching to H.264 using csd-0 + csd-1 from format")
+                                    (videoPacket as H264Packet).sendVideoInfo(bufferInfo.duplicate(), csd1.duplicate())
                                     sendInfo = true
-                                    Log.i(logTag, "Recovered by switching to H.264 from csd-0")
+                                } else {
+                                    // Fallback: try to extract both SPS and PPS from csd-0
+                                    val h264 = extractH264ParamSets(bufferInfo.duplicate())
+                                    if (h264 != null) {
+                                        (videoPacket as H264Packet).sendVideoInfo(h264.first, h264.second)
+                                        sendInfo = true
+                                        Log.i(logTag, "Recovered by switching to H.264 from csd-0")
+                                    } else {
+                                        Log.w(logTag, "Failed to recover H.264 from csd-0; csd-1 missing and extraction failed")
+                                    }
                                 }
                             } catch (e: Exception) {
                                 Log.w(logTag, "Failed to recover H.264 from csd-0: ${e.message}")
@@ -830,6 +1024,16 @@ class FlvMuxerRecordController: BaseRecordController() {
             .plus(timeStamp.toInt().toUInt24())
             .plus((timeStamp shr 24).toByte())
             .plus(byteArrayOf(0x00, 0x00, 0x00))
+    }
+
+    // Normalize different Pair return types to kotlin.Pair<ByteBuffer, ByteBuffer>
+    private fun normalizePairToKotlin(pairLike: Any?): Pair<ByteBuffer, ByteBuffer>? {
+        if (pairLike == null) return null
+        return when (pairLike) {
+            is kotlin.Pair<*, *> -> Pair(pairLike.first as ByteBuffer, pairLike.second as ByteBuffer)
+            is android.util.Pair<*, *> -> Pair(pairLike.first as ByteBuffer, pairLike.second as ByteBuffer)
+            else -> null
+        }
     }
 
     // Create a safe duplicate limited to `size` bytes starting at position 0

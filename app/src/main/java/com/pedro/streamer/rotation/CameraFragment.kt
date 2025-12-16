@@ -144,7 +144,7 @@ class CameraFragment: Fragment(), ConnectChecker {
         val folder = PathUtils.getRecordPath()
         if (!folder.exists()) folder.mkdir()
         val sdf = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.getDefault())
-        recordPath = "${folder.absolutePath}/root_${sdf.format(Date())}.mp4"
+        recordPath = "${folder.absolutePath}/root_${sdf.format(Date())}.flv"
         bRecord.setImageResource(R.drawable.pause_icon)
           val recordController = FlvMuxerRecordController()
           genericStream.setRecordController(recordController)
