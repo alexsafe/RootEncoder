@@ -49,7 +49,7 @@ public class TextStreamObject extends StreamObjectBase {
   public void load(String text, float textSize, int textColor, int backgroundColor, Typeface typeface) {
     numFrames = 1;
     imageBitmap = textAsBitmap(text, textSize, textColor, backgroundColor, typeface);
-    Log.i(TAG, "finish load text");
+//    Log.i(TAG, "finish load text");
   }
 
   @Override

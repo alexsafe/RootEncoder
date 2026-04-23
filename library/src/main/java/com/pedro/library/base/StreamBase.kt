@@ -233,6 +233,7 @@ abstract class StreamBase(
   fun startStream(endPoint: String) {
     if (isStreaming) throw IllegalStateException("Stream already started, stopStream before startStream again")
     isStreaming = true
+    updateStreamOnlyBackpressureMode()
     startStreamImp(endPoint)
       if (!isRecording)  startSources()
     requestKeyframe()
@@ -273,6 +274,10 @@ abstract class StreamBase(
     glInterface.forceFpsLimit(fps)
   }
 
+  private fun updateStreamOnlyBackpressureMode() {
+    glInterface.setStreamOnlyBackpressureEnabled(isStreaming && !isRecording && !isOnPreview)
+  }
+
   /**
    * @param codecTypeVideo force type codec used. FIRST_COMPATIBLE_FOUND, SOFTWARE, HARDWARE
    * @param codecTypeAudio force type codec used. FIRST_COMPATIBLE_FOUND, SOFTWARE, HARDWARE
@@ -293,6 +298,7 @@ abstract class StreamBase(
    */
   fun stopStream(): Boolean {
     isStreaming = false
+    updateStreamOnlyBackpressureMode()
     stopStreamImp()
     if (!isRecording) {
       stopSources()
@@ -318,6 +324,7 @@ abstract class StreamBase(
       videoEncoderRecord.requestKeyframe()
     }
     recordController.startRecord(path, listener, usedTracks)
+    updateStreamOnlyBackpressureMode()
     if (!isStreaming) startSources()
     requestKeyframe()
   }
@@ -330,6 +337,7 @@ abstract class StreamBase(
    */
   fun stopRecord(): Boolean {
     recordController.stopRecord()
+    updateStreamOnlyBackpressureMode()
     if (!isStreaming) {
       stopSources()
       return prepareEncoders()
@@ -395,6 +403,7 @@ abstract class StreamBase(
     if (!surface.isValid) throw IllegalArgumentException("Make sure the Surface is valid")
     if (isOnPreview) throw IllegalStateException("Preview already started, stopPreview before startPreview again")
     isOnPreview = true
+    updateStreamOnlyBackpressureMode()
     if (!glInterface.isRunning) glInterface.start()
     if (!videoSource.isRunning()) {
       videoSource.start(glInterface.surfaceTexture)
@@ -410,6 +419,7 @@ abstract class StreamBase(
   @JvmOverloads
   fun stopPreview(removeCallbacks: Boolean = false) {
     isOnPreview = false
+    updateStreamOnlyBackpressureMode()
     if (!isStreaming && !isRecording) videoSource.stop()
     glInterface.deAttachPreview()
     if (!isStreaming && !isRecording) glInterface.stop()

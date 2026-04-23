@@ -64,7 +64,7 @@ public class GifStreamObject extends StreamObjectBase {
         gifBitmaps[i] = gifDecoder.getNextFrame();
         gifDelayFrames[i] = gifDecoder.getNextDelay();
       }
-      Log.i(TAG, "finish load gif frames");
+//      Log.i(TAG, "finish load gif frames");
     } else {
       throw new IOException("Read gif error");
     }

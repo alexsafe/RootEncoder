@@ -21,6 +21,7 @@ import android.graphics.Point
 import android.graphics.SurfaceTexture
 import android.graphics.SurfaceTexture.OnFrameAvailableListener
 import android.os.Build
+import android.os.SystemClock
 import android.util.Log
 import android.view.Surface
 import androidx.annotation.RequiresApi
@@ -46,7 +47,9 @@ import java.util.concurrent.BlockingQueue
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.LinkedBlockingQueue
+import java.util.concurrent.RejectedExecutionException
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicLong
 import kotlin.math.max
 
 
@@ -55,6 +58,14 @@ import kotlin.math.max
  */
 @RequiresApi(api = Build.VERSION_CODES.JELLY_BEAN_MR2)
 class GlStreamInterface(private val context: Context) : OnFrameAvailableListener, GlInterface {
+
+    companion object {
+        private const val TAG = "GlStreamInterface"
+        private const val METRICS_LOG_INTERVAL_MS = 2000L
+        private const val SLOW_DRAW_NS = 20_000_000L
+        private const val SLOW_SWAP_NS = 20_000_000L
+        private const val MAX_COALESCED_DRAINS_PER_RUN = 2
+    }
 
     private var takePhotoCallback: TakePhotoCallback? = null
 
@@ -91,6 +102,20 @@ class GlStreamInterface(private val context: Context) : OnFrameAvailableListener
     private val fpsLimiter = FpsLimiter()
     private val forceRender = ForceRenderer()
     var autoHandleOrientation = false
+    private val streamOnlyBackpressureEnabled = AtomicBoolean(false)
+    private val renderJobRunning = AtomicBoolean(false)
+    private val pendingFrame = AtomicBoolean(false)
+    private val framesArrived = AtomicLong(0)
+    private val renderJobsQueued = AtomicLong(0)
+    private val framesCoalescedWhileBusy = AtomicLong(0)
+    private val drawsSkippedByFpsLimiter = AtomicLong(0)
+    private val drawCount = AtomicLong(0)
+    private val slowDrawCount = AtomicLong(0)
+    private val blockedSourceSwapCount = AtomicLong(0)
+    private val blockedEncoderSwapCount = AtomicLong(0)
+    private val blockedOtherSwapCount = AtomicLong(0)
+    private val lastMetricsLogMs = AtomicLong(0)
+    private val forcedRenderPending = AtomicBoolean(false)
     private var shouldHandleOrientation = true
     private var renderErrorCallback: RenderErrorCallback? = null
     private var previewViewPort: ViewPort? = null
@@ -191,6 +216,10 @@ class GlStreamInterface(private val context: Context) : OnFrameAvailableListener
         executor?.shutdownNow()
         executor = null
         executor = newSingleThreadExecutor(threadQueue)
+        resetMetrics()
+        renderJobRunning.set(false)
+        pendingFrame.set(false)
+        forcedRenderPending.set(false)
         val width = max(encoderWidth, encoderRecordWidth)
         val height = max(encoderHeight, encoderRecordHeight)
         surfaceManager.release()
@@ -204,12 +233,17 @@ class GlStreamInterface(private val context: Context) : OnFrameAvailableListener
             running.set(true)
             mainRender.getSurfaceTexture().setOnFrameAvailableListener(this)
             forceRender.start {
-                executor?.execute {
-                    try {
-                        draw(true)
-                    } catch (e: RuntimeException) {
-                        renderErrorCallback?.onRenderError(e) ?: throw e
+                if (!streamOnlyBackpressureEnabled.get()) {
+                    executor?.execute {
+                        try {
+                            draw(true)
+                        } catch (e: RuntimeException) {
+                            renderErrorCallback?.onRenderError(e) ?: throw e
+                        }
                     }
+                } else {
+                    forcedRenderPending.set(true)
+                    scheduleCoalescedRender()
                 }
             }
         }
@@ -220,6 +254,9 @@ class GlStreamInterface(private val context: Context) : OnFrameAvailableListener
         threadQueue.clear()
         executor?.shutdownNow()
         executor = null
+        renderJobRunning.set(false)
+        pendingFrame.set(false)
+        forcedRenderPending.set(false)
         forceRender.stop()
         sensorRotationManager.stop()
         surfaceManagerPhoto.release()
@@ -233,9 +270,145 @@ class GlStreamInterface(private val context: Context) : OnFrameAvailableListener
         mainRender.release()
     }
 
+    fun setStreamOnlyBackpressureEnabled(enabled: Boolean) {
+        val changed = streamOnlyBackpressureEnabled.getAndSet(enabled) != enabled
+        if (changed && enabled) resetMetrics()
+        logBackpressureMode(enabled)
+    }
+
+    private fun resetMetrics() {
+        framesArrived.set(0)
+        renderJobsQueued.set(0)
+        framesCoalescedWhileBusy.set(0)
+        drawsSkippedByFpsLimiter.set(0)
+        drawCount.set(0)
+        slowDrawCount.set(0)
+        blockedSourceSwapCount.set(0)
+        blockedEncoderSwapCount.set(0)
+        blockedOtherSwapCount.set(0)
+        lastMetricsLogMs.set(0)
+    }
+
+    private fun logBackpressureMode(enabled: Boolean) {
+        Log.i(
+            TAG,
+            "streamOnlyDiagnostic mode=${if (enabled) "backpressure_on" else "backpressure_off"} queue=${threadQueue.size}"
+        )
+    }
+
+    private fun logRenderMetrics(
+        event: String,
+        drawNs: Long = -1L,
+        sourceSwapNs: Long = -1L,
+        encoderSwapNs: Long = -1L,
+        otherSwapNs: Long = -1L
+    ) {
+        Log.i(
+            TAG,
+            "streamOnlyDiagnostic event=$event queue=${threadQueue.size} " +
+                "arrived=${framesArrived.get()} jobs=${renderJobsQueued.get()} " +
+                "coalescedWhileBusy=${framesCoalescedWhileBusy.get()} fpsLimitedDraws=${drawsSkippedByFpsLimiter.get()} " +
+                "draws=${drawCount.get()} slowDraws=${slowDrawCount.get()} " +
+                "blockedSource=${blockedSourceSwapCount.get()} blockedEncoder=${blockedEncoderSwapCount.get()} blockedOther=${blockedOtherSwapCount.get()} " +
+                "drawMs=${if (drawNs >= 0) drawNs / 1_000_000.0 else -1.0} " +
+                "sourceSwapMs=${if (sourceSwapNs >= 0) sourceSwapNs / 1_000_000.0 else -1.0} " +
+                "encoderSwapMs=${if (encoderSwapNs >= 0) encoderSwapNs / 1_000_000.0 else -1.0} " +
+                "otherSwapMs=${if (otherSwapNs >= 0) otherSwapNs / 1_000_000.0 else -1.0}"
+        )
+    }
+
+    private fun maybeLogRenderMetrics(
+        event: String,
+        drawNs: Long = -1L,
+        sourceSwapNs: Long = -1L,
+        encoderSwapNs: Long = -1L,
+        otherSwapNs: Long = -1L
+    ) {
+        if (!streamOnlyBackpressureEnabled.get()) return
+        val now = SystemClock.elapsedRealtime()
+        val shouldLog = event.contains("coalesced") ||
+            event.startsWith("drop_") ||
+            threadQueue.size > 0 ||
+            drawNs >= SLOW_DRAW_NS ||
+            sourceSwapNs >= SLOW_SWAP_NS ||
+            encoderSwapNs >= SLOW_SWAP_NS ||
+            otherSwapNs >= SLOW_SWAP_NS ||
+            now - lastMetricsLogMs.get() >= METRICS_LOG_INTERVAL_MS
+        if (!shouldLog) return
+        lastMetricsLogMs.set(now)
+        logRenderMetrics(event, drawNs, sourceSwapNs, encoderSwapNs, otherSwapNs)
+    }
+
+    private fun swapBufferMeasured(surfaceName: String, manager: SurfaceManager): Long {
+        val startNs = System.nanoTime()
+        manager.swapBuffer()
+        val elapsedNs = System.nanoTime() - startNs
+        if (elapsedNs >= SLOW_SWAP_NS) {
+            when (surfaceName) {
+                "source" -> blockedSourceSwapCount.incrementAndGet()
+                "encoder" -> blockedEncoderSwapCount.incrementAndGet()
+                else -> blockedOtherSwapCount.incrementAndGet()
+            }
+            Log.w(
+                TAG,
+                "streamOnlyDiagnostic slowSwap surface=$surfaceName ms=${elapsedNs / 1_000_000.0} queue=${threadQueue.size}"
+            )
+        }
+        return elapsedNs
+    }
+
+    private fun scheduleCoalescedRender() {
+        if (!renderJobRunning.compareAndSet(false, true)) return
+        renderJobsQueued.incrementAndGet()
+        val currentExecutor = executor
+        if (currentExecutor == null) {
+            renderJobRunning.set(false)
+            return
+        }
+        try {
+            currentExecutor.execute {
+                runCoalescedRenderLoop()
+            }
+        } catch (_: RejectedExecutionException) {
+            renderJobRunning.set(false)
+        }
+    }
+
+    private fun runCoalescedRenderLoop() {
+        try {
+            var drains = 0
+            while (isRunning && streamOnlyBackpressureEnabled.get() && drains < MAX_COALESCED_DRAINS_PER_RUN) {
+                val hadPendingFrame = pendingFrame.getAndSet(false)
+                val hadForcedRender = forcedRenderPending.getAndSet(false)
+                if (!hadPendingFrame && !hadForcedRender) break
+                // Real frames take precedence over forced renders. Forced renders are best-effort
+                // wakeups in stream-only mode and can be absorbed when a real frame is already pending.
+                if (hadPendingFrame) {
+                    draw(false)
+                } else {
+                    draw(true)
+                }
+                drains++
+            }
+        } catch (e: RuntimeException) {
+            renderErrorCallback?.onRenderError(e) ?: throw e
+        } finally {
+            renderJobRunning.set(false)
+            if (isRunning && streamOnlyBackpressureEnabled.get() &&
+                (pendingFrame.get() || forcedRenderPending.get())
+            ) {
+                scheduleCoalescedRender()
+            }
+        }
+    }
+
     private fun draw(forced: Boolean) {
         if (!isRunning) return
+        val drawStartNs = System.nanoTime()
         val limitFps = fpsLimiter.limitFPS()
+        var sourceSwapNs = -1L
+        var encoderSwapNs = -1L
+        var otherSwapNs = -1L
         if (!forced) forceRender.frameAvailable()
 
         if (!filterQueue.isEmpty() && mainRender.isReady()) {
@@ -258,7 +431,7 @@ class GlStreamInterface(private val context: Context) : OnFrameAvailableListener
             if (!surfaceManager.makeCurrent()) return
             mainRender.updateFrame()
             mainRender.drawSource()
-            surfaceManager.swapBuffer()
+            sourceSwapNs = swapBufferMeasured("source", surfaceManager)
         }
 
         val orientation = when (orientationForced) {
@@ -283,7 +456,7 @@ class GlStreamInterface(private val context: Context) : OnFrameAvailableListener
                     w, h, orientation, streamOrientation,
                     isStreamVerticalFlip, isStreamHorizontalFlip, streamViewPort
                 )
-                surfaceManagerEncoder.swapBuffer()
+                encoderSwapNs = swapBufferMeasured("encoder", surfaceManagerEncoder)
             }
         }
         // render VideoEncoder (record if the resolution is different than stream)
@@ -295,7 +468,8 @@ class GlStreamInterface(private val context: Context) : OnFrameAvailableListener
                     w, h, orientation, streamOrientation,
                     isStreamVerticalFlip, isStreamHorizontalFlip, streamViewPort
                 )
-                surfaceManagerEncoderRecord.swapBuffer()
+                otherSwapNs =
+                    maxOf(otherSwapNs, swapBufferMeasured("encoderRecord", surfaceManagerEncoderRecord))
             }
         }
         //render surface photo if request photo
@@ -319,13 +493,13 @@ class GlStreamInterface(private val context: Context) : OnFrameAvailableListener
                     photoWidth, photoHeight, AspectRatioMode.NONE,
                     streamOrientation, isStreamVerticalFlip, isStreamHorizontalFlip, streamViewPort
                 )
-                Log.d("GlStreamInterface", "takePhoto photoWidthxphotoHeight:  ${photoWidth}x${photoHeight}; " +
-                        "recordWidth: $encoderRecordWidth; encoderHeight: $encoderRecordHeight" +
-                        "; streamWidth: $encoderWidth; streamHeight: $encoderHeight;" +
-                        "")
+//                Log.d("GlStreamInterface", "takePhoto photoWidthxphotoHeight:  ${photoWidth}x${photoHeight}; " +
+//                        "recordWidth: $encoderRecordWidth; encoderHeight: $encoderRecordHeight" +
+//                        "; streamWidth: $encoderWidth; streamHeight: $encoderHeight;" +
+//                        "")
                 takePhotoCallback?.onTakePhoto(GlUtil.getBitmap(photoWidth, photoHeight))
                 takePhotoCallback = null
-                surfaceManagerPhoto.swapBuffer()
+                otherSwapNs = maxOf(otherSwapNs, swapBufferMeasured("photo", surfaceManagerPhoto))
             }
         }
 
@@ -336,14 +510,14 @@ class GlStreamInterface(private val context: Context) : OnFrameAvailableListener
             val h = if (previewHeight == 0) encoderHeight else previewHeight
             if (surfaceManager.makeCurrent()) {
                 mainRender.drawFilters(true)
-                surfaceManager.swapBuffer()
+                otherSwapNs = maxOf(otherSwapNs, swapBufferMeasured("previewSource", surfaceManager))
             }
             if (surfaceManagerPreview.makeCurrent()) {
                 mainRender.drawScreenPreview(
                     w, h, orientationPreview, aspectRatioMode, 0,
                     isPreviewVerticalFlip, isPreviewHorizontalFlip, previewViewPort
                 )
-                surfaceManagerPreview.swapBuffer()
+                otherSwapNs = maxOf(otherSwapNs, swapBufferMeasured("preview", surfaceManagerPreview))
             }
         }
         // render extra multi-preview surfaces (using independent configuration from PreviewSurfaceInfo)
@@ -352,7 +526,7 @@ class GlStreamInterface(private val context: Context) : OnFrameAvailableListener
             if (!surfaceManagerPreview.isReady) {
                 if (surfaceManager.makeCurrent()) {
                     mainRender.drawFilters(true)
-                    surfaceManager.swapBuffer()
+                    otherSwapNs = maxOf(otherSwapNs, swapBufferMeasured("multiPreviewSource", surfaceManager))
                 }
             }
             val previewSnapshot = multiPreviewSurfaceManagers.values.toList()
@@ -370,22 +544,45 @@ class GlStreamInterface(private val context: Context) : OnFrameAvailableListener
                             info.config.horizontalFlip,
                             info.config.viewPort
                         )
-                        info.surfaceManager.swapBuffer()
+                        otherSwapNs = maxOf(otherSwapNs, swapBufferMeasured("multiPreview", info.surfaceManager))
                     }
                 }
             }
         }
+
+        val drawNs = System.nanoTime() - drawStartNs
+        drawCount.incrementAndGet()
+        if (drawNs >= SLOW_DRAW_NS) slowDrawCount.incrementAndGet()
+        if (limitFps) drawsSkippedByFpsLimiter.incrementAndGet()
+        maybeLogRenderMetrics(
+            event = if (forced) "forced_draw" else if (limitFps) "draw_fps_limited" else "draw",
+            drawNs = drawNs,
+            sourceSwapNs = sourceSwapNs,
+            encoderSwapNs = encoderSwapNs,
+            otherSwapNs = otherSwapNs
+        )
     }
 
     override fun onFrameAvailable(surfaceTexture: SurfaceTexture?) {
         if (!isRunning) return
-        executor?.execute {
-            try {
-                draw(false)
-            } catch (e: RuntimeException) {
-                renderErrorCallback?.onRenderError(e) ?: throw e
+        if (!streamOnlyBackpressureEnabled.get()) {
+            executor?.execute {
+                try {
+                    draw(false)
+                } catch (e: RuntimeException) {
+                    renderErrorCallback?.onRenderError(e) ?: throw e
+                }
             }
+            return
         }
+        framesArrived.incrementAndGet()
+        pendingFrame.set(true)
+        if (renderJobRunning.get()) {
+            framesCoalescedWhileBusy.incrementAndGet()
+            maybeLogRenderMetrics("frame_coalesced_while_busy")
+            return
+        }
+        scheduleCoalescedRender()
     }
 
     fun setOrientationConfig(orientationConfig: OrientationConfig) {

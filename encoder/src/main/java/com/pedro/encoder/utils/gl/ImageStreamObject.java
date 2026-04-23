@@ -46,7 +46,7 @@ public class ImageStreamObject extends StreamObjectBase {
   public void load(Bitmap imageBitmap) {
     this.imageBitmap = imageBitmap;
     numFrames = 1;
-    Log.i(TAG, "finish load image");
+//    Log.i(TAG, "finish load image");
   }
 
   @Override
