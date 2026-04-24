@@ -43,6 +43,7 @@ import android.view.MotionEvent
 import android.view.Surface
 import android.view.View
 import androidx.annotation.RequiresApi
+import com.pedro.common.FpsUtils
 import com.pedro.common.secureGet
 import com.pedro.encoder.input.video.Camera2ResolutionCalculator.getOptimalResolution
 import com.pedro.encoder.input.video.CameraHelper.Facing
@@ -51,7 +52,6 @@ import com.pedro.encoder.input.video.facedetector.mapCamera2Faces
 import java.util.concurrent.Executors
 import java.util.concurrent.Semaphore
 import kotlin.math.max
-import kotlin.math.min
 import kotlin.math.roundToInt
 
 /**
@@ -100,6 +100,7 @@ class Camera2ApiManager(context: Context) : CameraDevice.StateCallback() {
     var isRunning: Boolean = false
         private set
     private var fps = 30
+    private var preparedSize: Size? = null
     private val semaphore = Semaphore(0)
     private var cameraCallbacks: CameraCallbacks? = null
     private var requiredSize: Size? = null
@@ -129,6 +130,7 @@ class Camera2ApiManager(context: Context) : CameraDevice.StateCallback() {
         surfaceTexture.setDefaultBufferSize(optimalResolution.width, optimalResolution.height)
         this.surfaceEncoder = Surface(surfaceTexture)
         this.fps = fps
+        this.preparedSize = optimalResolution
         isPrepared = true
     }
 
@@ -146,6 +148,7 @@ class Camera2ApiManager(context: Context) : CameraDevice.StateCallback() {
     fun prepareCamera(surface: Surface, fps: Int) {
         this.surfaceEncoder = surface
         this.fps = fps
+        this.preparedSize = null
         isPrepared = true
     }
 
@@ -193,10 +196,40 @@ class Camera2ApiManager(context: Context) : CameraDevice.StateCallback() {
         val builderInputSurface = cameraDevice.createCaptureRequest(CameraDevice.TEMPLATE_PREVIEW)
         for (surface in surfaces) builderInputSurface.addTarget(surface)
         builderInputSurface.set(CaptureRequest.CONTROL_MODE, CameraMetadata.CONTROL_MODE_AUTO)
-        val validFps = min(60, fps)
-        builderInputSurface.set(CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE, Range(validFps, validFps))
+        val aeFpsRange = getResolvedAeFpsRange()
+        if (aeFpsRange != null) {
+            builderInputSurface.set(CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE, aeFpsRange)
+            Log.i(TAG, "requested fps: $fps, resolved AE fps range: ${aeFpsRange.lower}-${aeFpsRange.upper}")
+        }
         this.builderInputSurface = builderInputSurface
         return builderInputSurface.build()
+    }
+
+    private fun getResolvedAeFpsRange(): Range<Int>? {
+        val fpsRanges = getSupportedFpsForCurrentCamera(preparedSize)
+        if (fpsRanges.isEmpty()) return null
+        return try {
+            FpsUtils.adaptFpsRange(fps, fpsRanges)
+        } catch (_: IllegalArgumentException) {
+            null
+        }
+    }
+
+    private fun getSupportedFpsForCurrentCamera(size: Size?): List<Range<Int>> {
+        try {
+            val characteristics = cameraManager.getCameraCharacteristics(cameraId)
+            val fpsSupported = characteristics.get(CameraCharacteristics.CONTROL_AE_AVAILABLE_TARGET_FPS_RANGES) ?: return emptyList()
+            if (size == null) return listOf(*fpsSupported)
+            val streamConfigurationMap = characteristics.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP)
+            val minFrameDuration = streamConfigurationMap?.getOutputMinFrameDuration(SurfaceTexture::class.java, size)
+                ?: return listOf(*fpsSupported)
+            if (minFrameDuration <= 0L) return listOf(*fpsSupported)
+            val maxFps = (1_000_000_000L / minFrameDuration).toInt()
+            return fpsSupported.filter { it.upper <= maxFps }.ifEmpty { listOf(*fpsSupported) }
+        } catch (e: Exception) {
+            Log.e(TAG, "Error", e)
+            return emptyList()
+        }
     }
 
     fun setCustomRequest(request: (CaptureRequest.Builder) -> Unit): Boolean {
@@ -845,6 +878,7 @@ class Camera2ApiManager(context: Context) : CameraDevice.StateCallback() {
             surfaceEncoder = Surface(SurfaceTexture(-1).apply { release() })
             builderInputSurface = null
         }
+        preparedSize = null
         isPrepared = false
         isRunning = false
     }
